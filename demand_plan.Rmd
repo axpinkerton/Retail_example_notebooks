@@ -1,0 +1,111 @@
+---
+title: "ts"
+author: "Alex"
+date: "10/27/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(forecast)
+library(tidyverse)
+library(ggplot2)
+library(prophet)
+# library(greybox)
+library(tsintermittent)
+
+```
+
+
+```{r}
+## Input to the prophet model, total daily store sales for the highest volume store
+proph_inp<-data.frame(read_csv('/Users/APinkerton/Downloads/top_store_daily.csv'))
+
+## Input for a TS Intermittent model, one of the departments with only intermittent sales & lower volume
+tsi_inp<-read_csv('/Users/APinkerton/Downloads/ts_intermittent_input.csv')
+
+## Input for  a time series linear  model, same input as the prophet model, just to compare the models, forecasts and SMAPE's
+lm_inp<-data.frame(read_csv('/Users/APinkerton/Downloads/top_store_daily.csv'))
+
+```
+```{r}
+proph_inp$date=as.Date(proph_inp$date)
+store_list = unique(proph_inp$store_id)
+
+proph_train  = slice_head(proph_inp,n=nrow(proph_inp)-90)
+proph_train
+test_df = slice_tail(proph_inp,n=90)
+test_df
+colnames(proph_train)<-c('index','store','ds','y')
+
+prophet_forecasts=data.frame(matrix(ncol=23,nrow=0, dimnames=list(NULL,c("ds", "trend", "additive_terms", "additive_terms_lower", "additive_terms_upper", 
+"daily", "daily_lower", "daily_upper", "weekly", "weekly_lower", 
+"weekly_upper", "yearly", "yearly_lower", "yearly_upper", "multiplicative_terms", 
+"multiplicative_terms_lower", "multiplicative_terms_upper", "yhat_lower", 
+"yhat_upper", "trend_lower", "trend_upper", "yhat",'store'))))
+
+for (x in store_list){
+  XXX<-proph_train%>%filter(proph_train$store==x)%>%select(ds,y)
+  prophet_model_add<-prophet(XXX,  growth = "linear",
+  changepoints = NULL,
+  n.changepoints = 75,
+  changepoint.range = 0.8,
+  yearly.seasonality = "auto",
+  weekly.seasonality = "auto",
+  daily.seasonality = FALSE,
+  seasonality.mode = "additive",
+  seasonality.prior.scale = 15,
+  holidays.prior.scale = 15
+)
+  # prophet_model_mult<-prophet(XX,seasonality.mode = "multiplicative",)
+  future <- make_future_dataframe(prophet_model_add, periods = 90,freq='day')
+  fcat <- predict(prophet_model_add, future)
+  store=rep(x,length(future))
+  fcat<-cbind(fcat,item)
+  prophet_forecasts<-rbind(prophet_forecasts,fcat)
+}
+
+prophet_forecasts
+
+```
+
+```{r}
+tslm_train = proph_train
+tslm_train <- tslm_train %>% select(ds,y)
+tslm_train$ds = as.Date(tslm_train$ds)
+
+y <- ts(tslm_train, frequency = 365)
+y
+
+tslm_model <- tslm(y ~ trend + season)
+
+tslm_fcats = data.frame(forecast::forecast(tslm_model , h=90))
+tslm_fcats=tslm_fcats[tslm_fcats$Series=='y',]
+
+tslm_y = tslm_fcats$Point.Forecast
+tslm_y
+
+
+```
+
+```{r}
+# SMAPE function to test the last 90 days of actual data vs the forecasted y  values
+smape <- function(a, f) {  return (1/length(a) * sum(2*abs(f-a) / (abs(a)+abs(f))))}
+
+tslm_smape <- smape(test_df$sales,tslm_y)
+tslm_smape  ## 1.3986
+
+prophet_smape <- smape(test_df$sales,tail(prophet_forecasts$yhat,90))
+prophet_smape  ## 1.367 for the prophet model is slightly better than the TSLM's ## 1.3986
+```
+```{r}
+## Croston method for intermittent demand of a low-volume department within the store
+tsi_inp$date = as.Date(tsi_inp$date)
+
+croston_input <- tsi_inp %>% select(date, sales) %>% ts(., frequency = 365)
+croston_input
+
+## This outputs a daily forecast that is flat for all 90 demand-forecasted days
+intermittent_demand_fcat <- forecast::croston(croston_input,h=90)
+
+
+```
