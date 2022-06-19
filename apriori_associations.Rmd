@@ -1,0 +1,55 @@
+---
+title: "apriori_association"
+author: "Alex"
+date: "5/28/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(arules)
+library(arulesViz)
+
+gro1 = read.transactions('/Users/APinkerton/Downloads/archive (19)/groceries.csv')
+
+gro2 <- read.transactions('/Users/APinkerton/Downloads/archive (19)/groceries - groceries.csv')
+
+itemFrequencyPlot(gro1, topN = 10, col = rainbow(10))
+
+summary(gro1)
+
+rules <- apriori(gro1, parameter = list(supp = 0.001))
+rules
+summary(rules)
+
+plot(rules)
+
+plot(rules, method="two-key plot", jitter = 10)
+
+plot(rules, method="grouped")
+
+quality(rules)<-round(quality(rules),digits=3)
+
+redundant <- is.redundant(rules, measure="confidence")
+
+which(redundant)
+
+rules <- rules[!redundant]
+
+rules <-sort(rules, by="lift", decreasing=TRUE)
+
+summary(rules)
+
+inspect(rules[1:10])
+
+rules.top10 <- rules[1:10]
+
+plot(rules.top10)
+
+plot(rules.top10, method="two-key plot", jitter = 100)
+
+plot(rules.top10, method="grouped")
+
+plot(rules.top10, method="paracoord")
+
+```
