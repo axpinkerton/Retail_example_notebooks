@@ -1,0 +1,59 @@
+---
+title: "arules_sequential_pattern_mining"
+output:
+html_document: default
+pdf_document: default
+---
+
+```{r setup, include=TRUE}
+library(dplyr)
+library(tidyverse)
+library(arulesSequences)
+library(lubridate)
+
+## Reading in cleaned data
+xactions <- read_csv('/Users/APinkerton/Downloads/xactions.csv')
+xactions
+```
+
+```{r}
+# Subsetting columns
+colnames(xactions)
+keeps<-c( "custo_rank", "xaction_rank","itm_ct", "unique" )
+xactions=xactions[,keeps]
+
+# Renaming for the cSpade code
+colnames(xactions) = c('sequenceID','eventID','SIZE','items')
+```
+
+```{r}
+# Outputting a txt file to read in as a transaction format
+write.table(xactions, "mytxtout.txt", sep=";", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+# Reading in the export as transactions
+trans_matrix <- read_baskets("mytxtout.txt", sep = ";", info = c("sequenceID","eventID","SIZE"))
+summary(trans_matrix)
+```
+
+```{r}
+# cSpade algorithm--support is relatively low threshold becuase of large
+# assortment the retailer has
+sequences <- cspade(trans_matrix, parameter = list(support = 0.001), control = list(verbose = TRUE))
+
+# Examining
+sequences_df <- as(sequences, "data.frame")
+summary(sequences)
+sequences_df
+
+# Looking at the induction rules and what line items preclude / follow which 
+# other  line items
+induction_rules <- as(ruleInduction(sequences, confidence = 0.001, control = list(verbose = TRUE)), "data.frame")
+induction_rules
+```
+
+```{r}
+# Exporting results
+write_csv(sequences_df,'/Users/APinkerton/Downloads/sequence_support.csv')
+write_csv(induction_rules,'/Users/APinkerton/Downloads/induction_rules.csv')
+
+```
