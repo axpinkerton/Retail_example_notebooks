@@ -1,0 +1,350 @@
+---
+title: "bayesian"
+output: html_document
+date: '2022-08-29'
+---
+
+```{r }
+library(lubridate)
+library(bsts)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(xts)
+library(tsibble)
+library(timetk)
+library(schoolmath)
+library(Metrics)
+
+##  START TO LOG UNIT DEMANDS FOR FORECASTS
+item_df = read.csv('/Users/APinkerton/Downloads/item_ts_input.csv')
+store_df = read.csv('/Users/APinkerton/Downloads/store_ts_input.csv')
+
+item_df
+store_df
+
+# Min = '2013-01-01'
+# Max = '2015-10-01'
+
+```
+
+```{r}
+## STORE FORECASTS
+store_df
+## Will use the last 4 months of data as test data
+store_train = store_df[store_df$yr_mo<'2015-07-01',]
+store_test = store_df[store_df$yr_mo>'2015-06-01',]
+
+## Unit sales forecasts for each store
+store_train
+
+shop_list = unique(store_train$shop)
+
+#Empty Dataframe to add forecasted SMAPES
+smape_unit_df = data.frame(matrix(ncol=2,nrow=0, dimnames=list(NULL, c('Store','Smape' ))))
+# Just fitted, actual, date values, and store number empty dataframe
+store_unit_fcat = data.frame(matrix(ncol=4,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Store'))))
+# Fitted, actual, date values, store number, and confidence levels for all attributes and metrics
+store_unit_fcat_ci = data.frame(matrix(ncol=6,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Store',"Lo95", "Hi95"))))
+
+# Loop for all unit sales forecast for each store
+for (shop in shop_list){
+  # Try-Catch part of the loop to skip to next store if an error in encountered
+  skip_to_next <- FALSE
+  tryCatch({
+  df <- store_train[store_train$shop==shop,]
+ #converting data to a ts object
+  store_unit_ts <- ts(df$sales_units,frequency = 12, start = c(substr(min(df$yr_mo),1,4), substr(min(df$yr_mo),6,7)))
+  
+  y<-store_unit_ts
+  # Adding trend and seasonal trend (12 seasons for the 12 months in data)
+  ss <- AddLocalLinearTrend(list(), y)
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  # instantiating the bayesian structural time series model, 1000 iterations, disregarding the 250 first burn in iterations, and 85% confidence interval
+  bsts.model <- bsts(y, state.specification = ss, niter = 1000, ping=0, seed=1)
+  burn <- SuggestBurn(0.25, bsts.model)
+  p <- predict.bsts(bsts.model, horizon = 4, burn = burn, quantiles = c(.075, .925))
+  # putting together the forecasts from the model, adding smapes vs. actuals for the forecasts
+  AAA <-  c(as.numeric(-colMeans(bsts.model$one.step.prediction.errors[-(1:burn),])+store_unit_ts),as.numeric(p$mean))
+  ts_filled = c(store_unit_ts,store_test[store_test$shop==shop,]$sales_units)
+  months_full = c(df$yr_mo,store_test[store_test$shop==shop,]$yr_mo)
+  shop_list =rep(shop, length(AAA))
+  d2 <- data.frame(
+  AAA,
+  ts_filled,
+  months_full,
+  shop_list)
+  names(d2) <- c("Fitted", "Actual", "Date",'Store')
+  store_unit_fcat <- rbind(store_unit_fcat, d2)
+  posterior.interval <- cbind.data.frame(
+  as.numeric(p$interval[1,]),
+  as.numeric(p$interval[2,]),
+  subset(d2, Date>'2015-06-01')$Date)
+  names(posterior.interval) <- c("Lo85", "Hi85","Date")
+  d3 <- left_join(d2, posterior.interval, by="Date")
+  store_unit_fcat_ci<-rbind(store_unit_fcat_ci,d3)
+   smapes <- Metrics::smape(actual = d2[d2$Date>'2015-06-01',]$Actual, predicted = d2[d2$Date>'2015-06-01',]$Fitted)
+  inter <- cbind(shop, smapes)
+  names(inter) <- c('Store' , 'Smape')
+  smape_unit_df <- rbind(smape_unit_df,inter)
+  }
+  , error = function(e) { skip_to_next <<- TRUE})
+  if(skip_to_next) { next }     
+}
+# Looking at all of the forecasts & confidence intervals together
+store_unit_fcat_ci
+store_unit_fcat
+smape_unit_df
+
+ci_unit_store = unique(store_unit_fcat_ci$Store)
+# New loop to look at the fitted models, compare the hold out period forecasts vs the actuals, with the SMAPE in the title of each graph
+for (ind_store in ci_unit_store){
+  df22 <- store_unit_fcat_ci[store_unit_fcat_ci$Store==ind_store,]
+  df111 <- store_unit_fcat_ci[(store_unit_fcat_ci$Store==ind_store)&(store_unit_fcat_ci$Date>"2015-06-01"),]
+  gg33 <- ggplot(data=df22, aes(x=Date, group = 1)) + geom_line(aes(y=Actual, colour = 'Actual'),size=1) + geom_line(aes(y=Fitted, colour = 'Fitted'),size=1, linetype=2) + theme_bw() + theme(legend.title = element_blank()) + ylab("") + xlab("") + 
+  geom_vline(xintercept=as.numeric(as.Date("2015-07-01")), linetype=2) +
+  geom_ribbon(data = df111, aes(ymin=Lo85, ymax=Hi85), fill='grey', alpha=.5) +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) + 
+  ggtitle(paste0("BSTS -- Test SMAPE = ",round(100*smape_unit_df[smape_unit_df$shop==ind_store,]$smapes,2), "%","; Store #",ind_store))
+  print(gg33)
+}
+
+
+```
+
+```{r}
+# Dollar sales forecasts by store
+shop_list = unique(store_train$shop)
+
+#Empty Dataframe to add forecast SMAPES to
+smape_df = data.frame(matrix(ncol=2,nrow=0, dimnames=list(NULL, c('Store','Smape' ))))
+# Just fitted, actual, date values, and store number empty dataframe
+store_dollar_fcat = data.frame(matrix(ncol=4,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Store'))))
+# Fitted, actual, date values, store number, and confidence levels for each store-dollar forecast
+store_dollar_fcat_ci = data.frame(matrix(ncol=6,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Store',"Lo95", "Hi95"))))
+
+# Loop for all dollar sales forecast
+for (shop in shop_list){
+  # Try-Catch part of the loop to skip to next store if an error in encountered
+  skip_to_next <- FALSE
+  tryCatch({
+  df <- store_train[store_train$shop==shop,]
+  # Taking log of Sales--this serves to stabilize the variance, converting to a ts object
+  store_dol_ts <- ts(log10(df$sales_rev),frequency = 12, start = c(substr(min(df$yr_mo),1,4), substr(min(df$yr_mo),6,7)))
+  
+  y<-store_dol_ts
+  # Adding trend and seasonal trend (12 seasons for the 12 months in data)
+  ss <- AddLocalLinearTrend(list(), y)
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  # instantiating the bayesian structural time series model, 1000 iterations, disregarding the 250 first burn in iterations, and 85% confidence interval
+  bsts.model <- bsts(y, state.specification = ss, niter = 1000, ping=0, seed=1)
+  burn <- SuggestBurn(0.25, bsts.model)
+  p <- predict.bsts(bsts.model, horizon = 4, burn = burn, quantiles = c(.075, .925))
+  # putting together the forecasts from the model, adding smapes vs. actuals for the forecasts
+  AAA <-  c(as.numeric(-colMeans(bsts.model$one.step.prediction.errors[-(1:burn),])+store_dol_ts),as.numeric(p$mean))
+  ts_filled = c(store_dol_ts,log10(store_test[store_test$shop==shop,]$sales_rev))
+  months_full = c(df$yr_mo,store_test[store_test$shop==shop,]$yr_mo)
+  shop_list =rep(shop, length(AAA))
+  d2 <- data.frame(
+  10^(AAA),
+  10^(ts_filled),
+  months_full,
+  shop_list)
+  names(d2) <- c("Fitted", "Actual", "Date",'Store')
+  store_dollar_fcat <- rbind(store_dollar_fcat, d2)
+  posterior.interval <- cbind.data.frame(
+  10^(as.numeric(p$interval[1,])),
+  10^(as.numeric(p$interval[2,])),
+  subset(d2, Date>'2015-06-01')$Date)
+  names(posterior.interval) <- c("Lo85", "Hi85","Date")
+  d3 <- left_join(d2, posterior.interval, by="Date")
+  store_dollar_fcat_ci<-rbind(store_dollar_fcat_ci,d3)
+   smapes <- Metrics::smape(actual = d2[d2$Date>'2015-06-01',]$Actual, predicted = d2[d2$Date>'2015-06-01',]$Fitted)
+  inter <- cbind(shop, smapes)
+  names(inter) <- c('Store' , 'Smape')
+  smape_df <- rbind(smape_df,inter)
+  }
+  , error = function(e) { skip_to_next <<- TRUE})
+  if(skip_to_next) { next }     
+}
+# Looking at all of the forecasts & confidence intervals together
+store_dollar_fcat_ci
+
+store_dollar_fcat
+
+ci_store = unique(store_dollar_fcat_ci$Store)
+# New loop to look at the fitted models, compare the hold out period forecasts vs the actuals, with the SMAPE in the title of each graph
+for (ind_store in ci_store){
+  df22 <- store_dollar_fcat_ci[store_dollar_fcat_ci$Store==ind_store,]
+  df111 <- store_dollar_fcat_ci[(store_dollar_fcat_ci$Store==ind_store)&(store_dollar_fcat_ci$Date>"2015-06-01"),]
+  gg33 <- ggplot(data=df22, aes(x=Date, group = 1)) + geom_line(aes(y=Actual, colour = 'Actual'),size=1) + geom_line(aes(y=Fitted, colour = 'Fitted'),size=1, linetype=2) + theme_bw() + theme(legend.title = element_blank()) + ylab("") + xlab("") + 
+  geom_vline(xintercept=as.numeric(as.Date("2015-07-01")), linetype=2) +
+  geom_ribbon(data = df111, aes(ymin=Lo85, ymax=Hi85), fill='grey', alpha=.5) +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) + 
+  ggtitle(paste0("BSTS -- Test SMAPE = ",round(100*smape_df[smape_df$shop==ind_store,]$smapes,2), "%","; Store #",ind_store))
+  print(gg33)
+}
+
+```
+
+
+```{r}
+## ITEM FORECASTS
+item_df
+## Unit forecasts
+
+item_train = item_df[item_df$yr_mo<'2015-07-01',]
+item_test = item_df[item_df$yr_mo>'2015-06-01',]
+
+## Item level Sales unit forecasts, monthly
+item_train
+item_list = unique(item_train$item)
+
+#Empty Dataframe to add forecast SMAPES to
+smape_item_unit_df = data.frame(matrix(ncol=2,nrow=0, dimnames=list(NULL, c('Item','Smape' ))))
+# Just fitted, actual, date values, and item number empty dataframe
+item_unit_fcat = data.frame(matrix(ncol=4,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Item'))))
+# Fitted, actual, date values, item number, and confidence levels for 
+item_unit_fcat_ci = data.frame(matrix(ncol=6,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Item',"Lo95", "Hi95"))))
+
+# Loop for all item-level unit sales forecast
+for (itm in item_list){
+  # Try-Catch part of the loop to skip to next item if an error in encountered
+  skip_to_next <- FALSE
+  tryCatch({
+  df <- item_train[item_train$item==itm,]
+  item_unit_ts <- ts(df$sales_units,frequency = 12, start = c(substr(min(df$yr_mo),1,4), substr(min(df$yr_mo),6,7)))
+  y<-item_unit_ts
+  # Adding trend and seasonal trend (12 seasons for the 12 months in data)
+  ss <- AddLocalLinearTrend(list(), y)
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  # instantiating the bayesian structural time series model, 1000 iterations, disregarding the 250 first burn in iterations, and 85% confidence interval
+  bsts.model <- bsts(y, state.specification = ss, niter = 1000, ping=0, seed=1)
+  burn <- SuggestBurn(0.25, bsts.model)
+  p <- predict.bsts(bsts.model, horizon = 4, burn = burn, quantiles = c(.075, .925))
+  # putting together the forecasts from the model, adding smapes vs. actuals for the forecasts
+  AAA <-  c(as.numeric(-colMeans(bsts.model$one.step.prediction.errors[-(1:burn),])+item_unit_ts),as.numeric(p$mean))
+  ts_filled = c(item_unit_ts,item_test[item_test$item==itm,]$sales_units)
+  months_full = c(df$yr_mo,item_test[item_test$item==itm,]$yr_mo)
+  item_list =rep(itm, length(AAA))
+  d2 <- data.frame(
+    AAA,
+    ts_filled,
+    months_full,
+    item_list)
+  names(d2) <- c("Fitted", "Actual", "Date","Item")
+  item_unit_fcat <- rbind(item_unit_fcat, d2)
+  posterior.interval <- cbind.data.frame(
+  as.numeric(p$interval[1,]),
+  as.numeric(p$interval[2,]),
+  subset(d2, Date>'2015-06-01')$Date)
+  names(posterior.interval) <- c("Lo85", "Hi85","Date")
+  d3 <- dplyr::left_join(d2, posterior.interval, by="Date")
+  item_unit_fcat_ci<-rbind(item_unit_fcat_ci,d3)
+  smapes <- Metrics::smape(actual = d2[d2$Date>'2015-06-01',]$Actual, predicted = d2[d2$Date>'2015-06-01',]$Fitted)
+  inter <- cbind(itm, smapes)
+  names(inter) <- c('Item' , 'Smape')
+  smape_item_unit_df <- rbind(smape_item_unit_df,inter)
+  }
+  , error = function(e) { skip_to_next <<- TRUE})
+  if(skip_to_next) { next }     
+}
+# Looking at all of the forecasts & confidence intervals together
+item_unit_fcat_ci
+item_unit_fcat
+smape_item_unit_df
+
+
+ci_unit_item = unique(item_unit_fcat_ci$Item)
+# New loop to look at the fitted models, compare the hold out period forecasts vs the actuals, with the SMAPE in the title of each graph
+for (ind_itm in ci_unit_item){
+  df22 <- item_unit_fcat_ci[item_unit_fcat_ci$Item==ind_itm,]
+  df111 <- item_unit_fcat_ci[(item_unit_fcat_ci$Item==ind_itm)&(item_unit_fcat_ci$Date>"2015-06-01"),]
+  gg33 <- ggplot(data=df22, aes(x=Date, group = 1)) + geom_line(aes(y=Actual, colour = 'Actual'),size=1) + geom_line(aes(y=Fitted, colour = 'Fitted'),size=1, linetype=2) + theme_bw() + theme(legend.title = element_blank()) + ylab("") + xlab("") + 
+  geom_vline(xintercept=as.numeric(as.Date("2015-07-01")), linetype=2) +
+  geom_ribbon(data = df111, aes(ymin=Lo85, ymax=Hi85), fill='grey', alpha=.5) +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) + 
+  ggtitle(paste0("BSTS -- Test SMAPE = ",round(100*smape_item_unit_df[smape_item_unit_df$itm==ind_itm,]$smapes,2), "%","; Item #",ind_itm))
+  print(gg33)
+}
+item_unit_fcat
+item_unit_fcat_ci
+smape_item_unit_df
+```
+
+```{r}
+# Item / Dollar sales forecasts
+item_df
+
+item_train = item_df[item_df$yr_mo<'2015-07-01',]
+item_test = item_df[item_df$yr_mo>'2015-06-01',]
+
+#Empty Dataframe to add forecast SMAPES to
+smape_item_dol_df = data.frame(matrix(ncol=2,nrow=0, dimnames=list(NULL, c('Item','Smape' ))))
+# Just fitted, actual, date values, and item number empty dataframe
+item_dollar_fcat = data.frame(matrix(ncol=4,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Item'))))
+# Empty Fitted, actual, date values, item number, and confidence levels dataframes to add to later
+item_dollar_fcat_ci = data.frame(matrix(ncol=6,nrow=0, dimnames=list(NULL, c("Fitted", "Actual", "Date",'Item',"Lo95", "Hi95"))))
+# Item list to loop through
+itm_lst = unique(item_train$item)
+# Loop for all item-dollar sales forecast
+for (itm in itm_lst){
+  # Try-Catch part of the loop to skip to next item if an error in encountered
+  skip_to_next <- FALSE
+  tryCatch({
+  df <- item_train[item_train$item==itm,]
+  # Taking log of Sales--this serves to stabilize the variance, converting to a ts object
+  item_dol_ts <- ts(log10(df$sales_rev),frequency = 12, start = c(substr(min(df$yr_mo),1,4), substr(min(df$yr_mo),6,7)))
+  y<-item_dol_ts
+  # Adding trend and seasonal trend (12 seasons for the 12 months in data)
+  ss <- AddLocalLinearTrend(list(), y)
+  ss <- AddSeasonal(ss, y, nseasons = 12)
+  # instantiating the bayesian structural time series model, 1000 iterations, disregarding the 250 first burn in iterations, and 85% confidence interval
+  bsts.model <- bsts(y, state.specification = ss, niter = 1000, ping=0, seed=1)
+  burn <- SuggestBurn(0.25, bsts.model)
+  p <- predict.bsts(bsts.model, horizon = 4, burn = burn, quantiles = c(.075, .925))
+  # putting together the forecasts from the model, adding smapes vs. actuals for the forecasts
+  AAA <-  c(as.numeric(-colMeans(bsts.model$one.step.prediction.errors[-(1:burn),])+item_dol_ts),as.numeric(p$mean))
+  ts_filled = c(item_dol_ts,log10(item_test[item_test$item==itm,]$sales_rev))
+  months_full = c(df$yr_mo,item_test[item_test$item==itm,]$yr_mo)
+  item_list =rep(itm, length(AAA))
+  d2 <- data.frame(
+  10^(AAA),
+  10^(ts_filled),
+  months_full,
+  item_list)
+  names(d2) <- c("Fitted", "Actual", "Date",'Item')
+  item_dollar_fcat <- rbind(item_dollar_fcat, d2)
+  posterior.interval <- cbind.data.frame(
+  10^(as.numeric(p$interval[1,])),
+  10^(as.numeric(p$interval[2,])),
+  subset(d2, Date>'2015-06-01')$Date)
+  names(posterior.interval) <- c("Lo85", "Hi85","Date")
+  d3 <- dplyr::left_join(d2, posterior.interval, by="Date")
+  item_dollar_fcat_ci<-rbind(item_dollar_fcat_ci,d3)
+  smapes <- Metrics::smape(actual = d2[d2$Date>'2015-06-01',]$Actual, predicted = d2[d2$Date>'2015-06-01',]$Fitted)
+  inter <- cbind(itm, smapes)
+  names(inter) <- c('Item' , 'Smape')
+  smape_item_dol_df <- rbind(smape_item_dol_df,inter)
+  }
+  , error = function(e) { skip_to_next <<- TRUE})
+  if(skip_to_next) { next }     
+}
+# Looking at all of the forecasts & confidence intervals together
+item_dollar_fcat_ci
+item_dollar_fcat
+smape_item_dol_df
+ci_item_dol = unique(item_dollar_fcat_ci$Item)
+# New loop to look at the fitted models, compare the hold out period forecasts vs the actuals, with the SMAPE in the title of each graph
+for (ind_itm in ci_item_dol){
+  df22 <- item_dollar_fcat_ci[item_dollar_fcat_ci$Item==ind_itm,]
+  df111 <- item_dollar_fcat_ci[(item_dollar_fcat_ci$Item==ind_itm)&(item_dollar_fcat_ci$Date>"2015-06-01"),]
+  gg33 <- ggplot(data=df22, aes(x=Date, group = 1)) + geom_line(aes(y=Actual, colour = 'Actual'),size=1) + geom_line(aes(y=Fitted, colour = 'Fitted'),size=1, linetype=2) + theme_bw() + theme(legend.title = element_blank()) + ylab("") + xlab("") + 
+  geom_vline(xintercept=as.numeric(as.Date("2015-07-01")), linetype=2) +
+  geom_ribbon(data = df111, aes(ymin=Lo85, ymax=Hi85), fill='grey', alpha=.5) +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) + 
+  ggtitle(paste0("BSTS -- Test SMAPE = ",round(100*smape_item_dol_df[smape_item_dol_df$itm==ind_itm,]$smapes,2), "%","; Item #",ind_itm))
+  print(gg33)
+}
+```
+
